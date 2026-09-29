@@ -1,12 +1,17 @@
+import re
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
-from sklearn.metrics.pairwise import cosine_similarity
-
+from scipy.sparse import csr_matrix
 
 st.set_page_config(page_title="CineMatch | Movie Recommender", page_icon="🎬", layout="wide")
+DATA_DIR = Path(__file__).resolve().parent / "data"
+MOVIE_FILE = DATA_DIR / "movies.csv"
+RATING_FILE = DATA_DIR / "ratings.csv"
 
-MOVIES = [
+DEMO_MOVIES = [
     (1, "The Shawshank Redemption", 1994, "Drama"), (2, "The Godfather", 1972, "Crime"),
     (3, "The Dark Knight", 2008, "Action"), (4, "Pulp Fiction", 1994, "Crime"),
     (5, "Forrest Gump", 1994, "Drama"), (6, "The Matrix", 1999, "Sci-Fi"),
@@ -29,11 +34,9 @@ MOVIES = [
     (38, "Paddington 2", 2017, "Comedy"), (39, "The Conjuring", 2013, "Horror"),
     (40, "The Notebook", 2004, "Romance"),
 ]
-GENRES = sorted({movie[3] for movie in MOVIES})
-
 
 @st.cache_data
-def make_ratings():
+def make_demo_ratings():
     rng = np.random.default_rng(24)
     tastes = [
         {"Drama", "Crime", "Thriller"}, {"Sci-Fi", "Action", "Fantasy"},
@@ -48,47 +51,91 @@ def make_ratings():
     ]
     records = []
     for user_id, preferred in enumerate(tastes, start=1):
-        for movie_id, _, _, genre in MOVIES:
+        for movie_id, _, _, genre in DEMO_MOVIES:
             if rng.random() < 0.58:
                 rating = rng.normal(4.1 if genre in preferred else 3.0, 0.65)
                 records.append((user_id, movie_id, float(np.clip(round(rating * 2) / 2, 1, 5))))
     return pd.DataFrame(records, columns=["user_id", "movie_id", "rating"])
 
+def build_model(ratings):
+    user_ids = ratings["user_id"].to_numpy(dtype=np.int32, copy=False)
+    movie_ids = ratings["movie_id"].to_numpy(dtype=np.int32, copy=False)
+    values = ratings["rating"].to_numpy(dtype=np.float32, copy=False)
+    row_indices = user_ids - 1
+    user_count = int(row_indices.max()) + 1
+    movie_count = int(movie_ids.max()) + 1
+    counts_by_user = np.bincount(row_indices, minlength=user_count)
+    means_by_user = np.bincount(row_indices, weights=values, minlength=user_count) / counts_by_user
+    deviations = values - means_by_user[row_indices].astype(np.float32)
+    norms = np.sqrt(np.bincount(row_indices, weights=deviations * deviations, minlength=user_count))
+    rating_counts = np.bincount(movie_ids, minlength=movie_count).astype(np.int32)
+    matrix = csr_matrix((deviations, (row_indices, movie_ids)), shape=(user_count, movie_count), dtype=np.float32)
+    return {"matrix": matrix, "user_norms": norms.astype(np.float32), "global_mean": float(values.mean()), "rating_counts": rating_counts, "rating_total": len(ratings)}
 
-def recommend(user_ratings, ratings, movies, neighbors=6):
-    matrix = ratings.pivot(index="user_id", columns="movie_id", values="rating")
-    profile = pd.Series(user_ratings, dtype=float)
-    common = profile.index.intersection(matrix.columns)
-    if len(common) < 2:
+@st.cache_resource(show_spinner="Loading the movie ratings dataset...")
+def load_project_data():
+    if MOVIE_FILE.exists() and RATING_FILE.exists():
+        movies = pd.read_csv(MOVIE_FILE, usecols=["movieId", "title", "genres"], dtype={"movieId": np.int32})
+        ratings = pd.read_csv(RATING_FILE, usecols=["userId", "movieId", "rating"], dtype={"userId": np.int32, "movieId": np.int32, "rating": np.float32})
+        movies = movies.rename(columns={"movieId": "movie_id"})
+        movies["year"] = movies["title"].str.extract(r"\((\d{4})\)\s*$", expand=False).fillna("")
+        movies["title"] = movies["title"].str.replace(r"\s*\(\d{4}\)\s*$", "", regex=True)
+        movies["genre"] = movies["genres"].fillna("(no genres listed)").str.replace("|", ", ", regex=False)
+        movies = movies[["movie_id", "title", "year", "genre"]]
+        ratings = ratings.rename(columns={"userId": "user_id", "movieId": "movie_id"})
+        model = build_model(ratings)
+        del ratings
+        return movies, model, "MovieLens 25M"
+    movies = pd.DataFrame(DEMO_MOVIES, columns=["movie_id", "title", "year", "genre"])
+    model = build_model(make_demo_ratings())
+    return movies, model, "synthetic demo"
+
+def recommend(profile, model, movies, neighbors=40):
+    matrix = model["matrix"]
+    profile_movie_ids = np.fromiter(profile.keys(), dtype=np.int32)
+    profile_values = np.fromiter(profile.values(), dtype=np.float32)
+    valid = (profile_movie_ids > 0) & (profile_movie_ids < matrix.shape[1])
+    profile_movie_ids = profile_movie_ids[valid]
+    profile_values = profile_values[valid]
+    if len(profile_movie_ids) < 2:
         return pd.DataFrame()
-
-    user_mean = profile.mean()
-    centered_users = matrix.sub(matrix.mean(axis=1), axis=0).fillna(0)
-    target = pd.Series(0.0, index=matrix.columns)
-    target.loc[common] = profile.loc[common] - user_mean
-    sims = cosine_similarity(target.to_numpy().reshape(1, -1), centered_users.to_numpy())[0]
-    similarities = pd.Series(sims, index=matrix.index).clip(lower=0).sort_values(ascending=False)
-    similarities = similarities[similarities > 0].head(neighbors)
-    if similarities.empty:
+    target = profile_values - model["global_mean"]
+    target_norm = float(np.linalg.norm(target))
+    if target_norm < 1e-8:
+        target = np.ones_like(profile_values)
+        target_norm = float(np.linalg.norm(target))
+    overlap = np.asarray(matrix[:, profile_movie_ids] @ target).reshape(-1)
+    denominator = model["user_norms"] * target_norm
+    similarities = np.divide(overlap, denominator, out=np.zeros_like(overlap), where=denominator > 0)
+    eligible = np.flatnonzero(similarities > 0)
+    if not len(eligible):
         return pd.DataFrame()
+    if len(eligible) > neighbors:
+        chosen = eligible[np.argpartition(similarities[eligible], -neighbors)[-neighbors:]]
+    else:
+        chosen = eligible
+    chosen = chosen[np.argsort(similarities[chosen])[::-1]]
+    weights = similarities[chosen]
+    weighted_deviations = np.zeros(matrix.shape[1], dtype=np.float32)
+    total_weights = np.zeros(matrix.shape[1], dtype=np.float32)
+    for user_index, weight in zip(chosen, weights):
+        start, stop = matrix.indptr[user_index:user_index + 2]
+        movie_ids = matrix.indices[start:stop]
+        deviations = matrix.data[start:stop]
+        np.add.at(weighted_deviations, movie_ids, deviations * weight)
+        np.add.at(total_weights, movie_ids, weight)
+    candidate_ids = np.flatnonzero(total_weights > 0)
+    candidate_ids = candidate_ids[~np.isin(candidate_ids, profile_movie_ids)]
+    if not len(candidate_ids):
+        return pd.DataFrame()
+    predictions = np.clip(np.mean(profile_values) + weighted_deviations[candidate_ids] / total_weights[candidate_ids], 0.5, 5.0)
+    result = movies[movies["movie_id"].isin(candidate_ids)].copy()
+    result["predicted_rating"] = result["movie_id"].map(dict(zip(candidate_ids, predictions)))
+    result["rating_count"] = result["movie_id"].map(lambda movie_id: model["rating_counts"][movie_id] if movie_id < len(model["rating_counts"]) else 0)
+    return result.sort_values(["predicted_rating", "rating_count"], ascending=False)
 
-    predictions = {}
-    for movie_id in matrix.columns:
-        if movie_id in profile.index:
-            continue
-        observed = matrix[movie_id].dropna().index.intersection(similarities.index)
-        weights = similarities.loc[observed]
-        if weights.sum() > 0:
-            neighbor_means = matrix.loc[observed].mean(axis=1)
-            deltas = matrix.loc[observed, movie_id] - neighbor_means
-            predictions[movie_id] = float(np.clip(user_mean + np.dot(weights, deltas) / weights.sum(), 0.5, 5))
-    result = movies[movies.movie_id.isin(predictions)].copy()
-    result["predicted_rating"] = result.movie_id.map(predictions)
-    return result.sort_values("predicted_rating", ascending=False)
-
-
-movies = pd.DataFrame(MOVIES, columns=["movie_id", "title", "year", "genre"])
-ratings = make_ratings()
+movies, model, data_source = load_project_data()
+movie_lookup = movies.set_index("movie_id")
 st.markdown("""
 <style>
 .stApp {background: #0b1020; color: #f3f4f6;}
@@ -98,40 +145,65 @@ st.markdown("""
 .hero p {color: #bdc5da; margin-bottom: 0;}
 </style>
 """, unsafe_allow_html=True)
-st.markdown('<div class="hero"><h1>🎬 CineMatch</h1><p>Your next favorite film, found through people who rate movies like you.</p></div>', unsafe_allow_html=True)
+st.markdown('<div class="hero"><h1>🎬 CineMatch</h1><p>Find your next favorite film from viewers who rate movies like you.</p></div>', unsafe_allow_html=True)
+st.caption(f"Using {data_source} data: {len(movies):,} movies and {model['rating_total']:,} ratings.")
 left, right = st.columns([1.05, 1.55], gap="large")
+if "profile" not in st.session_state:
+    st.session_state.profile = {}
+profile = st.session_state.profile
 with left:
     st.subheader("Build your taste profile")
-    st.write("Rate a few films you’ve seen. More ratings help us find closer movie neighbors.")
-    selected = st.multiselect("Choose movies", movies.title.tolist(), default=["The Matrix", "Inception", "Interstellar", "The Dark Knight"])
-    profile = {}
-    if selected:
-        st.caption("Your rating (½ to 5 stars)")
-        for title in selected:
-            movie_id = int(movies.loc[movies.title == title, "movie_id"].iloc[0])
-            profile[movie_id] = st.slider(title, 0.5, 5.0, 4.0, 0.5, key=f"rating_{movie_id}")
-    count_col, genre_col = st.columns(2)
-    count_col.metric("Demo raters", ratings.user_id.nunique())
-    genre_col.metric("Genres", len(GENRES))
+    query = st.text_input("Search movies", placeholder="Type a movie title")
+    available_movies = movies[~movies["movie_id"].isin(profile)]
+    if query.strip():
+        matching_movies = available_movies[available_movies["title"].str.contains(re.escape(query.strip()), case=False, na=False)].head(40)
+    else:
+        popular_ids = np.argsort(model["rating_counts"])[::-1]
+        matching_movies = available_movies[available_movies["movie_id"].isin(popular_ids[:40])]
+    if not matching_movies.empty:
+        options = matching_movies["movie_id"].tolist()
+        def movie_label(movie_id):
+            movie = movie_lookup.loc[movie_id]
+            year = f" ({movie.year})" if movie.year else ""
+            return f"{movie.title}{year} - {movie.genre}"
+        chosen_movie = st.selectbox("Choose a movie to rate", options, format_func=movie_label)
+        new_rating = st.slider("Your rating", 0.5, 5.0, 4.0, 0.5, key="new_movie_rating")
+        if st.button("Add rating", use_container_width=True):
+            profile[chosen_movie] = new_rating
+            st.rerun()
+    elif query.strip():
+        st.info("No matching unrated movies. Try another title.")
+    if profile:
+        st.markdown("**Your ratings**")
+        for movie_id in list(profile):
+            movie = movie_lookup.loc[movie_id]
+            label = f"{movie.title} ({movie.year})" if movie.year else movie.title
+            rating_col, remove_col = st.columns([4, 1])
+            profile[movie_id] = rating_col.slider(label, 0.5, 5.0, float(profile[movie_id]), 0.5, key=f"rating_{movie_id}")
+            if remove_col.button("Remove", key=f"remove_{movie_id}"):
+                del profile[movie_id]
+                st.rerun()
+    count_col, catalog_col = st.columns(2)
+    count_col.metric("Your ratings", len(profile))
+    catalog_col.metric("Movies", f"{len(movies):,}")
     with st.expander("How recommendations work"):
-        st.write("We compare your mean-centered ratings with demo users using cosine similarity. The closest positive neighbors vote on movies you haven’t rated; their ratings are weighted by similarity.")
-
+        st.write("We compare your ratings with mean-centered rating patterns from other users using cosine similarity. The closest positive neighbors vote on unseen movies, weighted by similarity.")
 with right:
     st.subheader("Picked for you")
     if len(profile) < 2:
         st.info("Rate at least two movies to get personalized recommendations.")
     else:
-        results = recommend(profile, ratings, movies)
+        results = recommend(profile, model, movies)
         if results.empty:
-            st.info("We need a little more overlap. Try rating two more films from different genres.")
+            st.info("We need more overlap. Try rating a few more films from different genres.")
         else:
-            st.caption("Predicted ratings from your closest demo-user neighbors")
+            st.caption("Predicted ratings from your closest user neighbors")
             for _, movie in results.head(8).iterrows():
                 with st.container(border=True):
                     details, score = st.columns([4, 1])
-                    details.markdown(f"**{movie.title}**  ")
-                    details.caption(f"{int(movie.year)} · {movie.genre}")
-                    score.metric("Match", f"{movie.predicted_rating:.1f} ★")
-
+                    details.markdown(f"**{movie.title}**")
+                    year = f"{movie.year} · " if movie.year else ""
+                    details.caption(f"{year}{movie.genre}")
+                    score.metric("Match", f"{movie.predicted_rating:.1f} / 5")
 st.divider()
-st.caption("Movie catalog and ratings are synthetic demo data. Replace them with a real ratings dataset for production use.")
+st.caption("The bundled MovieLens data is for demonstration and research use. No real rating profile is saved.")

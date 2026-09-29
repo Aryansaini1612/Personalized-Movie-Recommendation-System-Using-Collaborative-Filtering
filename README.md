@@ -1,8 +1,8 @@
 # CineMatch: Personalized Movie Recommendation System
 
-An interactive movie recommender demonstrating **user-based collaborative filtering**. Rate a few films and the app finds similar demo users, then estimates your ratings for unseen movies.
+An interactive movie recommender using user-based collaborative filtering and the MovieLens 25M dataset.
 
-## Run locally
+## Run it
 
 Requires Python 3.9 or later.
 
@@ -15,11 +15,18 @@ streamlit run app.py
 
 On macOS or Linux, activate the environment with `source .venv/bin/activate`.
 
-## How it works
+The app looks for `data/movies.csv` and `data/ratings.csv` beside `app.py`. Extract these files from the supplied archive into the `data/` folder. If either file is missing, the app starts with synthetic demo data. The first run with the full dataset may take a few minutes while the sparse ratings model is built and cached.
 
-1. Build a user–movie ratings matrix.
-2. Center ratings by each user's average.
-3. Compare your profile with demo users using cosine similarity.
-4. Predict unseen movie ratings from the top positive neighbors, weighted by similarity.
+## Project files
 
-The project uses deterministic synthetic demo ratings so it runs without a dataset download or API key. Replace these ratings with a real dataset such as MovieLens for production use. Evaluate with a held-out split using RMSE or MAE; demo scores are not real audience ratings.
+- `app.py` - Streamlit interface, MovieLens loader, and sparse collaborative filtering model.
+- `requirements.txt` - Python dependencies.
+- `data/` - Local MovieLens CSV files; excluded from Git because `ratings.csv` is about 678 MB.
+
+## Recommendation method
+
+1. Mean-center each user's ratings.
+2. Compare the visitor's rated movies with other users using cosine similarity.
+3. Predict unrated movie scores from the 40 closest positive neighbors, weighted by similarity.
+
+The app requires at least two rated movies and returns up to eight recommendations. It does not save personal rating profiles. The dataset stays local and is not uploaded to this repository.

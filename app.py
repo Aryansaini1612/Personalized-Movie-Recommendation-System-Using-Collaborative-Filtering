@@ -11,52 +11,6 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 MOVIE_FILE = DATA_DIR / "movies.csv"
 RATING_FILE = DATA_DIR / "ratings.csv"
 
-DEMO_MOVIES = [
-    (1, "The Shawshank Redemption", 1994, "Drama"), (2, "The Godfather", 1972, "Crime"),
-    (3, "The Dark Knight", 2008, "Action"), (4, "Pulp Fiction", 1994, "Crime"),
-    (5, "Forrest Gump", 1994, "Drama"), (6, "The Matrix", 1999, "Sci-Fi"),
-    (7, "Goodfellas", 1990, "Crime"), (8, "Inception", 2010, "Sci-Fi"),
-    (9, "The Lord of the Rings: The Fellowship of the Ring", 2001, "Fantasy"),
-    (10, "Interstellar", 2014, "Sci-Fi"), (11, "The Silence of the Lambs", 1991, "Thriller"),
-    (12, "The Green Mile", 1999, "Drama"), (13, "Parasite", 2019, "Thriller"),
-    (14, "Spirited Away", 2001, "Animation"), (15, "Toy Story", 1995, "Animation"),
-    (16, "The Grand Budapest Hotel", 2014, "Comedy"), (17, "La La Land", 2016, "Romance"),
-    (18, "Titanic", 1997, "Romance"), (19, "Mad Max: Fury Road", 2015, "Action"),
-    (20, "Spider-Man: Into the Spider-Verse", 2018, "Animation"), (21, "Whiplash", 2014, "Drama"),
-    (22, "The Prestige", 2006, "Thriller"), (23, "Back to the Future", 1985, "Sci-Fi"),
-    (24, "The Princess Bride", 1987, "Fantasy"), (25, "Knives Out", 2019, "Mystery"),
-    (26, "The Social Network", 2010, "Drama"), (27, "Coco", 2017, "Animation"),
-    (28, "The Avengers", 2012, "Action"), (29, "Get Out", 2017, "Horror"),
-    (30, "Groundhog Day", 1993, "Comedy"), (31, "Amélie", 2001, "Romance"),
-    (32, "The Lion King", 1994, "Animation"), (33, "Arrival", 2016, "Sci-Fi"),
-    (34, "The Truman Show", 1998, "Comedy"), (35, "The Departed", 2006, "Crime"),
-    (36, "Dune: Part Two", 2024, "Sci-Fi"), (37, "Everything Everywhere All at Once", 2022, "Fantasy"),
-    (38, "Paddington 2", 2017, "Comedy"), (39, "The Conjuring", 2013, "Horror"),
-    (40, "The Notebook", 2004, "Romance"),
-]
-
-@st.cache_data
-def make_demo_ratings():
-    rng = np.random.default_rng(24)
-    tastes = [
-        {"Drama", "Crime", "Thriller"}, {"Sci-Fi", "Action", "Fantasy"},
-        {"Animation", "Fantasy", "Comedy"}, {"Romance", "Drama", "Comedy"},
-        {"Crime", "Thriller", "Action"}, {"Sci-Fi", "Drama", "Mystery"},
-        {"Animation", "Comedy", "Romance"}, {"Horror", "Thriller", "Mystery"},
-        {"Action", "Sci-Fi", "Crime"}, {"Drama", "Romance", "Fantasy"},
-        {"Comedy", "Animation", "Fantasy"}, {"Thriller", "Drama", "Crime"},
-        {"Sci-Fi", "Fantasy", "Action"}, {"Romance", "Comedy", "Drama"},
-        {"Horror", "Action", "Thriller"}, {"Crime", "Drama", "Mystery"},
-        {"Animation", "Sci-Fi", "Comedy"}, {"Fantasy", "Romance", "Drama"},
-    ]
-    records = []
-    for user_id, preferred in enumerate(tastes, start=1):
-        for movie_id, _, _, genre in DEMO_MOVIES:
-            if rng.random() < 0.58:
-                rating = rng.normal(4.1 if genre in preferred else 3.0, 0.65)
-                records.append((user_id, movie_id, float(np.clip(round(rating * 2) / 2, 1, 5))))
-    return pd.DataFrame(records, columns=["user_id", "movie_id", "rating"])
-
 def build_model(ratings):
     user_ids = ratings["user_id"].to_numpy(dtype=np.int32, copy=False)
     movie_ids = ratings["movie_id"].to_numpy(dtype=np.int32, copy=False)
@@ -74,21 +28,22 @@ def build_model(ratings):
 
 @st.cache_resource(show_spinner="Loading the movie ratings dataset...")
 def load_project_data():
-    if MOVIE_FILE.exists() and RATING_FILE.exists():
-        movies = pd.read_csv(MOVIE_FILE, usecols=["movieId", "title", "genres"], dtype={"movieId": np.int32})
-        ratings = pd.read_csv(RATING_FILE, usecols=["userId", "movieId", "rating"], dtype={"userId": np.int32, "movieId": np.int32, "rating": np.float32})
-        movies = movies.rename(columns={"movieId": "movie_id"})
-        movies["year"] = movies["title"].str.extract(r"\((\d{4})\)\s*$", expand=False).fillna("")
-        movies["title"] = movies["title"].str.replace(r"\s*\(\d{4}\)\s*$", "", regex=True)
-        movies["genre"] = movies["genres"].fillna("(no genres listed)").str.replace("|", ", ", regex=False)
-        movies = movies[["movie_id", "title", "year", "genre"]]
-        ratings = ratings.rename(columns={"userId": "user_id", "movieId": "movie_id"})
-        model = build_model(ratings)
-        del ratings
-        return movies, model, "MovieLens 25M"
-    movies = pd.DataFrame(DEMO_MOVIES, columns=["movie_id", "title", "year", "genre"])
-    model = build_model(make_demo_ratings())
-    return movies, model, "synthetic demo"
+    missing_files = [path.name for path in (MOVIE_FILE, RATING_FILE) if not path.is_file()]
+    if missing_files:
+        missing = ", ".join(missing_files)
+        raise FileNotFoundError(f"MovieLens 25M data file(s) missing from {DATA_DIR}: {missing}")
+
+    movies = pd.read_csv(MOVIE_FILE, usecols=["movieId", "title", "genres"], dtype={"movieId": np.int32})
+    ratings = pd.read_csv(RATING_FILE, usecols=["userId", "movieId", "rating"], dtype={"userId": np.int32, "movieId": np.int32, "rating": np.float32})
+    movies = movies.rename(columns={"movieId": "movie_id"})
+    movies["year"] = movies["title"].str.extract(r"\((\d{4})\)\s*$", expand=False).fillna("")
+    movies["title"] = movies["title"].str.replace(r"\s*\(\d{4}\)\s*$", "", regex=True)
+    movies["genre"] = movies["genres"].fillna("(no genres listed)").str.replace("|", ", ", regex=False)
+    movies = movies[["movie_id", "title", "year", "genre"]]
+    ratings = ratings.rename(columns={"userId": "user_id", "movieId": "movie_id"})
+    model = build_model(ratings)
+    del ratings
+    return movies, model, "MovieLens 25M"
 
 def recommend(profile, model, movies, neighbors=40):
     matrix = model["matrix"]
@@ -154,6 +109,8 @@ profile = st.session_state.profile
 with left:
     st.subheader("Build your taste profile")
     query = st.text_input("Search movies", placeholder="Type a movie title")
+    if not query.strip():
+        st.caption(f"Popular picks from the complete MovieLens catalog. Search all {len(movies):,} movies.")
     available_movies = movies[~movies["movie_id"].isin(profile)]
     if query.strip():
         matching_movies = available_movies[available_movies["title"].str.contains(re.escape(query.strip()), case=False, na=False)].head(40)

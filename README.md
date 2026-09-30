@@ -15,7 +15,7 @@ streamlit run app.py
 
 On macOS or Linux, activate the environment with `source .venv/bin/activate`.
 
-The repository includes `data/movies.csv` and `data/ratings.csv`. The ratings file is stored with Git Large File Storage (Git LFS); install Git LFS before cloning so the full dataset is downloaded. If either file is missing, the app starts with synthetic demo data. The first run with the full dataset may take a few minutes while the sparse ratings model is built and cached.
+The repository includes `data/movies.csv` and `data/ratings.csv`. The ratings file is stored with Git Large File Storage (Git LFS); install Git LFS before cloning so the full dataset is downloaded. Both files are required; the app reports a clear error rather than switching to demo data if either is missing. The first run with the full dataset may take a few minutes while the sparse ratings model is built and cached.
 
 ## Project files
 
